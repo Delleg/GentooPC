@@ -1,7 +1,6 @@
 mkdir /mnt/gentoo
 swapon /dev/nvme0n1p2
 mount /dev/nvme0n1p3 /mnt/gentoo
-mkdir /mnt/gentoo/boot
 mount /dev/nvme0n1p1 /mnt/gentoo/boot
 cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
 mount --types proc /proc /mnt/gentoo/proc
