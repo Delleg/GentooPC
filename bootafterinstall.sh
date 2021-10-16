@@ -1,3 +1,5 @@
+
+sudo su
 mkdir /mnt/{gentoo,backup}
 swapon /dev/nvme0n1p2
 mount /dev/nvme0n1p3 /mnt/gentoo
