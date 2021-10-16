@@ -1,7 +1,8 @@
-mkdir /mnt/gentoo
+mkdir /mnt/{gentoo,backup}
 swapon /dev/nvme0n1p2
 mount /dev/nvme0n1p3 /mnt/gentoo
 mount /dev/nvme0n1p1 /mnt/gentoo/boot
+mount /dev/nvme0n1p4 /mnt/gentoo/backup
 cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
 mount --types proc /proc /mnt/gentoo/proc
 mount --rbind /sys /mnt/gentoo/sys
