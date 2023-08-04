@@ -211,7 +211,8 @@ eclean-kernel
 
 # Aktualny .config 
 zcat /proc/config.gz > .config
-make allmodconfigdracu
+make defconfig
+make allmodconfig
 make localmodconfig
 dracut --force "" "$(cat /usr/src/linux/include/config/kernel.release)"
 
