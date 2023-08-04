@@ -1,0 +1,222 @@
+gdisk /dev/nvme0n1
+# vfat EF00
+# LVM 8E00
+mkfs.vfat -F32 /dev/nvme0n1p1
+mkdir -v /tmp/efiboot
+mount -v -t vfat /dev/nvme0n1p1 /tmp/efiboot
+export GPG_TTY=$(tty)
+dd if=/dev/urandom bs=8388607 count=1 | gpg --symmetric --cipher-algo AES256 --output /tmp/efiboot/luks.gpg
+gpg --decrypt /tmp/efiboot/luks.gpg | cryptsetup --cipher serpent-xts-plain64 --key-size 512 --hash whirlpool --key-file - luksFormat /dev/nvme0n1p2
+gpg --decrypt /tmp/efiboot/luks.gpg | cryptsetup --key-file - luksOpen /dev/nvme0n1p2 gentoo
+echo RELOADAGENT | gpg-connect-agent
+pvcreate /dev/mapper/gentoo
+vgcreate gentoo /dev/mapper/gentoo
+lvcreate --size 15G gentoo --name root
+lvcreate --extent 100%FREE gentoo --name home
+mkfs.btrfs /dev/mapper/gentoo-root
+mkfs.btrfs /dev/mapper/gentoo-home
+mkdir -p /mnt/gentoo
+mount /dev/mapper/gentoo-root /mnt/gentoo
+mkdir -p /mnt/gentoo/boot
+mount /dev/nvme0n1p1 /mnt/gentoo/boot
+mkdir /mnt/gentoo/home
+mount /dev/mapper/gentoo-home /mnt/gentoo/home
+
+wget -r -np -nH -A "stage3-amd64-systemd-2023*Z.tar.xz" https://gentoo.osuosl.org/releases/amd64/autobuilds/current-stage3-amd64-systemd/ -P /mnt/gentoo
+cd /mnt/gentoo && tar xvf stage3-*.tar.xz --xattrs
+mkdir -p /mnt/gentoo/etc/portage/repos.conf
+cp /mnt/gentoo/usr/share/portage/config/repos.conf /mnt/gentoo/etc/portage/repos.conf/gentoo.conf
+cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
+mount --types proc /proc /mnt/gentoo/proc
+mount --rbind /sys /mnt/gentoo/sys
+mount --rbind /dev /mnt/gentoo/dev
+mount --bind /run /mnt/gentoo/run
+mount --make-slave /mnt/gentoo/run
+chroot /mnt/gentoo /bin/bash
+env-update && source /etc/profile
+export PS1="(chroot) $PS1"
+emerge --sync
+date -s "$(curl -s --head http://google.com | grep ^Date: | sed 's/Date: //g') -0200"
+echo "Europe/Warsaw" > /etc/timezone
+emerge --config sys-libs/timezone-data
+cat << EOF > /etc/locale.gen
+pl_PL ISO-8859-2
+pl_PL.UTF-8 UTF-8
+EOF
+locale-gen
+cat << EOF > /etc/portage/make.conf
+COMMON_FLAGS="-march=skylake -mabm -mno-adx -mno-avx2 -mno-f16c -mno-fma -mno-sgx -mno-xsave -mno-xsavec -mno-xsaveopt -mno-xsaves --param=l1-cache-line-size=64 --param=l1-cache-size=32 --param=l2-cache-size=12288 -O2 -pipe"
+CFLAGS="${COMMON_FLAGS}"
+CXXFLAGS="${COMMON_FLAGS}"
+FCFLAGS="${COMMON_FLAGS}"
+FFLAGS="${COMMON_FLAGS}"
+CPU_FLAGS_X86="aes mmx mmxext pclmul popcnt rdrand sse sse2 sse3 sse4_1 sse4_2 ssse3"
+ACCEPT_KEYWORDS="~amd64"
+PORTDIR="/var/db/repos/gentoo"
+DISTDIR="/var/cache/distfiles"
+PKGDIR="/var/cache/binpkgs"
+PORTAGE_ELOG_CLASSES="info warn error log qa"
+PORTAGE_ELOG_SYSTEM="echo save"
+FEATURES="assume-digests candy protect-owned sandbox sfperms strict unmerge-logs unmerge-orphans userfetch userpriv parallel-fetch"
+AUTOCLEAN="yes"
+EMERGE_DEFAULT_OPTS="--autounmask-use=y --rebuild-if-new-slot=y --complete-graph=y --autounmask-continue=y --autounmask-keep-keywords=y --autounmask-keep-masks=y --autounmask-write --autounmask-unrestricted-atoms=y --quiet-build --ask --verbose --read-news=n -j6 --load-average=7"
+PORTAGE_RSYNC_EXTRA_OPTS="--contimeout=10"
+ACCEPT_LICENSE="*"
+LINGUAS="pl_PL pl"
+L10N="pl-PL pl"
+MAKEOPTS="--jobs=6 --load-average=7"
+GENTOO_MIRRORS="http://ftp.vectranet.pl/gentoo/"
+EOF
+emerge gentoo-sources
+eselect kernel set 1
+eselect profile set 22
+mkdir -p /etc/portage/{env,package.env}
+echo "MAKEOPTS=\"-j1\"" > /etc/portage/env/serialize-make.conf
+echo "app-crypt/efitools serialize-make.conf" > /etc/portage/package.env/efitools
+echo "sys-fs/lvm2 lvm thin" > /etc/portage/package.use/lvm2
+echo "sys-boot/grub truetype device-mapper efiemu mount" > /etc/portage/package.use/grub
+echo "sys-fs/cryptsetup -static-libs" > /etc/portage/package.use/cryptsetup
+echo "sys-apps/systemd cryptsetup gnuefi" > /etc/portage/package.use/systemd
+echo "dev-vcs/git -perl" > /etc/portage/package.use/git
+echo ">$(equery -q l gcc)" > /etc/portage/package.mask/gcc
+emerge gentoolkit grub genfstab dev-vcs/git linux-firmware intel-microcode systemd efibootmgr dracut btrfs-progs cryptsetup lvm2 multipath-tools rsyslog biosdevname nvme-cli rng-tools
+emerge -auvDN world
+genfstab -P -U / > /etc/fstab
+grub-install --target=x86_64-efi --efi-directory=/boot /dev/nvme0n1
+# bootctl --path=/boot install
+cat << EOF > /etc/portage/repos.conf/xoores-overlay.conf
+[xoores-overlay]
+location = /var/db/repos/xoores-overlay
+sync-type = git
+sync-uri = https://github.com/xoores/gentoo-overlay.git
+priority = 50
+auto-sync = yes
+EOF
+emaint sync --repo xoores-overlay
+emerge --sync buildkernel-next
+echo "sys-kernel/buildkernel-next **" > /etc/portage/package.accept_keywords/buildkernel-next
+echo "sys-kernel/buildkernel-next" >> /etc/portage/package.unmask
+emerge -va buildkernel-next
+export BOOT_TARGET=/dev/nvme0n1p1
+export INIT_SYSTEM=systemd
+
+# emerge -e --keep-going @world
+# echo "sys-kernel/gentoo-sources ~amd64" > /etc/portage/package.accept_keywords/gentoo-sources
+
+# gcc -c -Q -march=native --help=target | awk '/^  -march=/ {print $2}' # skylake
+# COMMON_FLAGS="-march=skylake -O2 -pipe"
+# lscpu | awk '/^CPU\(s\):/ {print $2}'
+
+# emerge mirrorselect -va
+# mirrorselect -s3 -b10 -D -o >> /etc/portage/make.conf
+# emerge cpuid2cpuflags resolve-march-native --oneshot -va
+# resolve-march-native -a
+# cpuid2cpuflags
+# eselect profile list
+
+# ls /dev/mapper
+# Bez klucza GPG
+# cryptsetup -v --cipher aes-xts-plain64 --key-size 256 -y luksFormat /dev/nvme0n1p2
+
+#revdepend-rebuild -i
+# echo "sys-kernel/genkernel ~amd64" > /etc/portage/package.accept_keywords/genkernel
+
+
+
+
+
+
+
+
+
+
+
+
+# konfiguracja bootloadera (???)
+# Scieżka
+# z kluczem gpg
+# fedora
+
+/vmlinuz-4.2.0-1.fc23.x86_64 root=/dev/mapper/fedora-root ro rd.md=0 rd.dm=0 rd.lvm.lv=fedora/swap crashkernel=auto rd.luks=0 vconsole.keymap=us rd.lvm.lv=fedora/root rhgb quiet
+
+root=/dev/mapper/gentoo-root rootfstype=btrfs rd.luks.uuid=luks-8040f6ce-3c3e-42db-9c95-2ea0dc81f601 rd.luks.key=luks.gpg:UUID=58DC-EC46 dolvm rc.vconsole.keymap=pl rd.vconsole.unicoderd.md=0 rd.dm=0 rd.multipath=0 rd.shell
+
+# Bez klucza
+root=/dev/mapper/gentoo-root rootfstype=btrfs rd.luks.uuid=luks-8040f6ce-3c3e-42db-9c95-2ea0dc81f601 dolvm rc.vconsole.keymap=pl rd.vconsole.unicoderd.md=0 rd.dm=0 rd.multipath=0 rd.shell
+
+# efibootmgr -c -d /dev/sda -p 2 -L "Gentoo" -l "\efi\boot\bootx64.efi" initrd='\initramfs-genkernel-amd64-6.1.38-gentoo'
+# dracut
+--kernel-cmdline="rd.vconsole.font=lat2-16 rd.vconsole.keymap=pl2 rd.locale.LANG=pl_PL.UTF-8 rd.luks=1 rd.lvm=1 rd.md=0 rd.dm=0 rd.shell rd.debug log_buf_len=1M"
+dracut --list-modules
+dracut  --kernel-cmdline --hostonly-cmdline "root=/dev/mapper/gentoo-root rootfstype=btrfs rd.luks.uuid=luks-8040f6ce-3c3e-42db-9c95-2ea0dc81f601 dolvm rc.vconsole.keymap=pl rd.vconsole.unicoderd.md=0 rd.dm=0 rd.multipath=0 rd.shell" --hostonly --fstab --add-fstab /etc/fstab --uefi --early-microcode --persistent-policy by-uuid --filesystems btrfs -xz --print-cmdline --early-microcode --fscks btrfs -kver=6.4.6-gentoo-x86_64
+rd.luks.uuid=luks-8040f6ce-3c3e-42db-9c95-2ea0dc81f601 rd.lvm.lv=gentoo/root root=UUID=c9740e98-5a46-4bc7-ba4c-8c58f18b58be rootfstype=btrfs rootflags=discard,noatime,commit=600,errors=remount-ro
+https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Bootloader
+
+dracut --no-hostonly-i18n --fstab --filesystems "vfat ext4 btrfs" --early-microcode --uefi --conf /etc/dracut.conf.d/kernel-6.4.6-gentoo-x86_64 --kernel-cmdline="rd.vconsole.font=lat2-16 rd.vconsole.keymap=pl2 rd.locale.LANG=pl_PL.UTF-8 rd.luks=1 rd.lvm=1 rd.md=0 rd.dm=0 rd.shell rd.debug log_buf_len=1M"
+
+# dodanie ścieżki bootloadera 
+efibootmgr -c -d /dev/nvme0n1p1 -p 2 -L "Gentoo" -l "\EFI\Linux\linux-6.4.6-gentoo-x86_64-24d1563aae5f4bc89405e62e7e4fea49.efi"
+
+ --microcode=intel 
+
+# Edycja /etc/lvm/lvm.conf
+nano -w /etc/lvm/lvm.conf
+use_lvmetad = 1
+issue_discards = 1
+volume_list = ["gentoo"]
+
+# Gdy coś pójdzie nie tak, a napewno nie pójdzie :)
+sudo su # jeśli potrzeba, np dla Ubuntu
+
+# Następnie
+export GPG_TTY=$(tty)
+mkdir /tmp/efiboot
+mount -t vfat /dev/nvme0n1p1 /tmp/efiboot
+gpg --decrypt /tmp/efiboot/luks.gpg | cryptsetup --key-file - luksOpen /dev/nvme0n1p2 gentoo
+vgchange --available y
+mkdir /mnt/gentoo
+mount /dev/mapper/gentoo-root /mnt/gentoo/
+# mount /dev/mapper/gentoo-home /mnt/gentoo/home
+cp -n -f -L /etc/resolv.conf /mnt/gentoo/etc/
+mount -t proc none /mnt/gentoo/proc
+mount --rbind /sys /mnt/gentoo/sys
+mount --rbind /dev /mnt/gentoo/dev
+mount -t vfat /dev/nvme0n1p1 /mnt/gentoo/boot/
+chroot /mnt/gentoo /bin/bash
+env-update && source /etc/profile
+export PS1="(chroot) $PS1"
+clear
+
+# Dodatkowe żeczy 
+
+# Aktualizacja i rekompilacja całego systemu
+emerge -auvDN @world
+
+history -c # usunięcie całej historii
+
+
+# dracut problem 
+dracut  --force --kver $(ls /lib/modules | tail -n 1)
+
+net-misc/networkmanager sys-fs/btrfs-progs net-fs/cifs-utils sys-apps/busybox sys-fs/multipath-tools app-admin/rsyslog app-crypt/tpm2-tools sys-apps/biosdevname sys-apps/nvme-cli sys-apps/rng-tools
+
+# locale
+echo "LC_ALL=pl_PL.UTF-8" >> /etc/environment
+echo "pl_PL.UTF-8 UTF-8" >> /etc/locale.gen
+echo "LANG=pl_PL.UTF-8" > /etc/locale.conf
+
+blkid /dev/nvme0n1p2 -s UUID -o value
+
+eclean-kernel
+
+# Aktualny .config 
+zcat /proc/config.gz > .config
+make allmodconfigdracu
+make localmodconfig
+dracut --force "" "$(cat /usr/src/linux/include/config/kernel.release)"
+
+emerge --deselect app-eselect/eselect-awk app-eselect/eselect-sh
+emerge --depclean app-eselect/eselect-awk app-eselect/eselect-sh
+emerge --sync
+emerge -a -uvDU @world (or other similar standard world upgrade command)
+emerge --ask --depclean
