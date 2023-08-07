@@ -8,6 +8,11 @@ export GPG_TTY=$(tty)
 dd if=/dev/urandom bs=8388607 count=1 | gpg --symmetric --cipher-algo AES256 --output /tmp/efiboot/luks.gpg
 gpg --decrypt /tmp/efiboot/luks.gpg | cryptsetup --cipher serpent-xts-plain64 --key-size 512 --hash whirlpool --key-file - luksFormat /dev/nvme0n1p2
 gpg --decrypt /tmp/efiboot/luks.gpg | cryptsetup --key-file - luksOpen /dev/nvme0n1p2 gentoo
+mkfifo key_pipe
+gpg --decrypt /tmp/efiboot/luks.gpg > /tmp/efiboot/key_pipe &
+cryptsetup luksAddKey --key-file /tmp/efiboot/key_pipe /dev/nvme0n1p2
+cryptsetup luksDump /dev/nvme0n1p2
+rm /tmp/efiboot/key_pipe
 echo RELOADAGENT | gpg-connect-agent
 pvcreate /dev/mapper/gentoo
 vgcreate gentoo /dev/mapper/gentoo
@@ -43,7 +48,10 @@ cat << EOF > /etc/locale.gen
 pl_PL ISO-8859-2
 pl_PL.UTF-8 UTF-8
 EOF
-locale-gen
+cat << EOF > /etc/vconsole.conf
+KEYMAP=pl
+FONT=Lat2-Terminus16
+EOF
 cat << EOF > /etc/portage/make.conf
 COMMON_FLAGS="-march=skylake -mabm -mno-adx -mno-avx2 -mno-f16c -mno-fma -mno-sgx -mno-xsave -mno-xsavec -mno-xsaveopt -mno-xsaves --param=l1-cache-line-size=64 --param=l1-cache-size=32 --param=l2-cache-size=12288 -O2 -pipe"
 CFLAGS="${COMMON_FLAGS}"
@@ -66,8 +74,9 @@ LINGUAS="pl_PL pl"
 L10N="pl-PL pl"
 MAKEOPTS="--jobs=6 --load-average=7"
 GENTOO_MIRRORS="http://ftp.vectranet.pl/gentoo/"
+VIDEO_CARDS="vmware"
 EOF
-emerge gentoo-sources
+emerge gentoolkit gentoo-sources
 eselect kernel set 1
 eselect profile set 22
 mkdir -p /etc/portage/{env,package.env}
@@ -80,26 +89,65 @@ echo "sys-apps/systemd cryptsetup gnuefi" > /etc/portage/package.use/systemd
 echo "dev-vcs/git -perl" > /etc/portage/package.use/git
 echo ">$(equery -q l gcc)" > /etc/portage/package.mask/gcc
 emerge gentoolkit grub genfstab dev-vcs/git linux-firmware intel-microcode systemd efibootmgr dracut btrfs-progs cryptsetup lvm2 multipath-tools rsyslog biosdevname nvme-cli rng-tools
-emerge -auvDN world
 genfstab -P -U / > /etc/fstab
 grub-install --target=x86_64-efi --efi-directory=/boot /dev/nvme0n1
-# bootctl --path=/boot install
-cat << EOF > /etc/portage/repos.conf/xoores-overlay.conf
-[xoores-overlay]
-location = /var/db/repos/xoores-overlay
-sync-type = git
-sync-uri = https://github.com/xoores/gentoo-overlay.git
-priority = 50
-auto-sync = yes
-EOF
-emaint sync --repo xoores-overlay
-emerge --sync buildkernel-next
-echo "sys-kernel/buildkernel-next **" > /etc/portage/package.accept_keywords/buildkernel-next
-echo "sys-kernel/buildkernel-next" >> /etc/portage/package.unmask
-emerge -va buildkernel-next
-export BOOT_TARGET=/dev/nvme0n1p1
-export INIT_SYSTEM=systemd
+cd /var/cache/distfiles && https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz
+emerge genkernel
+systemctl enable lvm2-monitor.service
+####
 
+Enabling device mapper and crypt target
+[*] Enable loadable module support [CONFIG_MODULES=y]
+Device Drivers --->
+    [*] Multiple devices driver support (RAID and LVM) --->  [MD=y] 
+        <*> Device mapper support  [CONFIG_BLK_DEV_DM=y]
+        <*>   Crypt target support [CONFIG_DM_CRYPT=y]
+ 
+Enabling cryptographic API functions        
+[*] Cryptographic API ---> [CRYPTO=y]
+    <*> XTS support        [CONFIG_CRYPTO_XTS=y]
+    <*> SHA224 and SHA256 digest algorithm [CONFIG_CRYPTO_SHA256=y]
+    <*> SHA384 and SHA512 digest algorithm [CONFIG_CRYPTO_SHA512=y]
+    <*> AES cipher algorithms [CONFIG_CRYPTO_AES=y]
+    <*> User-space interface for hash algorithms [CONFIG_CRYPTO_USER_API_HASH=y]
+    <*> User-space interface for symmetric key cipher algorithms [CONFIG_CRYPTO_USER_API_SKCIPHER=y]
+ 
+Enabling initramfs support
+General setup  --->
+    [*] Initial RAM filesystem and RAM disk (initramfs/initrd) support [CONFIG_BLK_DEV_INITRD=y]
+ 
+Enabling tcrypt (TrueCrypt/tcplay/VeraCrypt compatibility mode) support
+Device Drivers --->
+    [*] Block Devices [CONFIG_BLK_DEV=y]---> 
+        <*> Loopback device support [CONFIG_BLK_DEV_LOOP=y]
+File systems ---> 
+     <*> FUSE (Filesystem in Userspace) support [CONFIG_FUSE_FS=y] 
+[*] Cryptographic API ---> 
+     <*> RIPEMD-160 digest algorithm [CONFIG_CRYPTO_RMD160=y]
+     <*> SHA384 and SHA512 digest algorithms [CONFIG_CRYPTO_SHA512=y]
+     <*> Whirlpool digest algorithms [CONFIG_CRYPTO_WP512=y]
+     <*> LRW support [CONFIG_CRYPTO_LRW=y]
+     <*> Serpent cipher algorithm [CONFIG_CRYPTO_SERPENT=y]
+     <*> Twofish cipher algorithm [CONFIG_CRYPTO_TWOFISH=y]
+
+Device Drivers --->
+    Character devices --->
+    [*] TPM Hardware Support --->
+        <*> TPM Interface Specification 1.2 Interface / TPM 2.0 FIFO Interface
+        <*> TPM 2.0 CRB Interface
+
+zcat /proc/config.gz > .config
+cd /usr/src/linux
+make allmodconfig
+make localmodconfig
+#tpm2.0
+eselect repository enable guru
+emaint sync --repo guru
+emerge clevis
+clevis luks bind -d /dev/nvme0n1p2 tpm2 '{"pcr_bank":"sha256","pcr_ids":"0,2,3,5,6,7"}'
+cryptsetup luksDump /dev/nvme0n1p2
+
+emerge -auvDN world
 # emerge -e --keep-going @world
 # echo "sys-kernel/gentoo-sources ~amd64" > /etc/portage/package.accept_keywords/gentoo-sources
 
@@ -148,7 +196,9 @@ root=/dev/mapper/gentoo-root rootfstype=btrfs rd.luks.uuid=luks-8040f6ce-3c3e-42
 # dracut
 --kernel-cmdline="rd.vconsole.font=lat2-16 rd.vconsole.keymap=pl2 rd.locale.LANG=pl_PL.UTF-8 rd.luks=1 rd.lvm=1 rd.md=0 rd.dm=0 rd.shell rd.debug log_buf_len=1M"
 dracut --list-modules
-dracut  --kernel-cmdline --hostonly-cmdline "root=/dev/mapper/gentoo-root rootfstype=btrfs rd.luks.uuid=luks-8040f6ce-3c3e-42db-9c95-2ea0dc81f601 dolvm rc.vconsole.keymap=pl rd.vconsole.unicoderd.md=0 rd.dm=0 rd.multipath=0 rd.shell" --hostonly --fstab --add-fstab /etc/fstab --uefi --early-microcode --persistent-policy by-uuid --filesystems btrfs -xz --print-cmdline --early-microcode --fscks btrfs -kver=6.4.6-gentoo-x86_64
+dracut  --kernel-cmdline --hostonly-cmdline "root=/dev/mapper/gentoo-root rootfstype=btrfs rd.luks.uuid=luks-8040f6ce-3c3e-42db-9c95-2ea0dc81f601 dolvm rc.vconsole.keymap=pl rd.vconsole.unicoderd.md=0 rd.dm=0 rd.multipath=0 rd.shell"
+
+--hostonly --fstab --add-fstab /etc/fstab --uefi --early-microcode --persistent-policy by-uuid --filesystems btrfs -xz --print-cmdline --early-microcode --fscks btrfs -kver=6.4.6-gentoo-x86_64
 rd.luks.uuid=luks-8040f6ce-3c3e-42db-9c95-2ea0dc81f601 rd.lvm.lv=gentoo/root root=UUID=c9740e98-5a46-4bc7-ba4c-8c58f18b58be rootfstype=btrfs rootflags=discard,noatime,commit=600,errors=remount-ro
 https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Bootloader
 
@@ -176,7 +226,7 @@ gpg --decrypt /tmp/efiboot/luks.gpg | cryptsetup --key-file - luksOpen /dev/nvme
 vgchange --available y
 mkdir /mnt/gentoo
 mount /dev/mapper/gentoo-root /mnt/gentoo/
-# mount /dev/mapper/gentoo-home /mnt/gentoo/home
+mount /dev/mapper/gentoo-home /mnt/gentoo/home
 cp -n -f -L /etc/resolv.conf /mnt/gentoo/etc/
 mount -t proc none /mnt/gentoo/proc
 mount --rbind /sys /mnt/gentoo/sys
@@ -211,7 +261,6 @@ eclean-kernel
 
 # Aktualny .config 
 zcat /proc/config.gz > .config
-make defconfig
 make allmodconfig
 make localmodconfig
 dracut --force "" "$(cat /usr/src/linux/include/config/kernel.release)"
@@ -221,3 +270,23 @@ emerge --depclean app-eselect/eselect-awk app-eselect/eselect-sh
 emerge --sync
 emerge -a -uvDU @world (or other similar standard world upgrade command)
 emerge --ask --depclean
+
+gpg --export-secret-key -a Artur > prv.key
+gpg --armor --export-options export-minimal --export ${RECIPIENT} > /safe/place/crypt-public-key.gpg
+
+
+
+
+### BEGIN /etc/grub.d/40_custom ###
+exec tail -n +3 $0
+# This file provides an easy way to add custom menu entries.  Simply type the
+# menu entries you want to add after this comment.  Be careful not to change
+# the 'exec tail' line above.
+
+menuentry "Peppermint-10" {
+set isofile="/Peppermint-10-20191210-amd64.iso"
+loopback loop (/dev/nvme0np7)$isofile
+linux (loop)/casper/vmlinux boot=casper iso-scan/filename=/Peppermint-10-20191210-amd64.iso noprompt noeject quit splash
+initrd (loop)/casper/initrd.lz
+}
+### END /etc/grub.d/40_custom ###
